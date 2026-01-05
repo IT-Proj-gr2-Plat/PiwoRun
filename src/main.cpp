@@ -327,6 +327,7 @@ int main(int argc, char* argv[]) {
         editor->handleMouse(mx_editor, my_editor, camX_editor_f);
         continue;
             }
+            }
 
             // frame update & render
             const Uint8* kb = SDL_GetKeyboardState(nullptr);
