@@ -1,6 +1,7 @@
 #include <SDL.h>
 #include <SDL_image.h>
 #include <SDL_ttf.h>
+#include <SDL_mixer.h>
 #include <iostream>
 #include "Texture.h"
 #include "Player.h"
@@ -8,9 +9,16 @@
 #include "LevelEditor.h"
 #include "Menu.h"
 #include "MainMenu.h"
+#include "Enemy.h"
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <vector>
+#include <cstdio>
+
+static Mix_Chunk* globalPickSound = nullptr;
+static Mix_Chunk* globalStepSound = nullptr;
+static Mix_Chunk* globalDeadSound = nullptr;
 
 
 static void resolvePlayerCollisions(Player& player, Level& level, int cellW, int cellH) {
@@ -50,9 +58,22 @@ static void resolvePlayerCollisions(Player& player, Level& level, int cellW, int
             float iy = std::min(top + ph, ty + cellH) - std::max(top, ty);
 
             if (ix > 0.0f && iy > 0.0f) {
-                if (cell == 3) {
-                    player.score += 10;
+                if (cell == 3 || cell == 4 || cell == 6 || cell == 7 || cell == 8 || cell == 9) {
+                    if (cell == 8) {
+                        player.health += 1;
+                    } else if (cell == 9) {
+                        player.health += 1;
+                        int points = 5 + rand() % 6; // 5 to 10
+                        player.score += points;
+                    } else {
+                        int points = 5;
+                        if (cell == 4) points = 10;
+                        else if (cell == 6) points = 15;
+                        else if (cell == 7) points = 20;
+                        player.score += points;
+                    }
                     level.grid[r][c] = 0; // remove pickup
+                    if (globalPickSound) Mix_PlayChannel(-1, globalPickSound, 0);
                     continue;
                 }
 
@@ -91,6 +112,7 @@ static void resolvePlayerCollisions(Player& player, Level& level, int cellW, int
                     player.health -= 1;
                     player.invulnTimer = player.invuln;
                     if (player.health < 0) player.health = 0;
+                    level.grid[r][c] = 0; // remove damaging pickup
                 }
             }
         }
@@ -99,6 +121,77 @@ static void resolvePlayerCollisions(Player& player, Level& level, int cellW, int
     // Ensure the resolved values are applied
     player.x = px;
     player.y = top + ph;
+}
+
+static void resolveEnemyCollisions(Enemy& enemy, Level& level, int cellW, int cellH) {
+    if (cellW <= 0 || cellH <= 0) return;
+    if (level.rows <= 0 || level.cols <= 0) return;
+
+    const float eps = 0.0001f;
+
+    // Enemy physics: enemy.x is left, enemy.y is _feet_ (bottom).
+    float px = enemy.x;
+    float pw = static_cast<float>(enemy.width);
+    float top = enemy.y - static_cast<float>(enemy.height);
+    float ph = static_cast<float>(enemy.height);
+
+    int minCol = (int)std::floor(px / cellW);
+    int maxCol = (int)std::floor((px + pw - eps) / cellW);
+    int minRow = (int)std::floor(top / cellH);
+    int maxRow = (int)std::floor((top + ph - eps) / cellH);
+
+    minCol = std::max(0, minCol);
+    minRow = std::max(0, minRow);
+    maxCol = std::min(level.cols - 1, maxCol);
+    maxRow = std::min(level.rows - 1, maxRow);
+
+    for (int r = minRow; r <= maxRow; ++r) {
+        if (r < 0 || r >= (int)level.grid.size()) continue;
+        for (int c = minCol; c <= maxCol; ++c) {
+            if (c < 0 || c >= (int)level.grid[r].size()) continue;
+
+            int cell = level.grid[r][c]; // 0=empty,1=solid,2=damaging,3=pickup
+            if (cell != 1) continue; // only solid for enemy
+
+            float tx = static_cast<float>(c * cellW);
+            float ty = static_cast<float>(r * cellH);
+
+            float ix = std::min(px + pw, tx + cellW) - std::max(px, tx);
+            float iy = std::min(top + ph, ty + cellH) - std::max(top, ty);
+
+            if (ix > 0.0f && iy >= 0.0f) {
+                // Resolve along smaller penetration
+                if (ix < iy) {
+                    // horizontal push
+                    if (px + pw * 0.5f < tx + cellW * 0.5f) {
+                        // push left
+                        px -= ix;
+                    } else {
+                        // push right
+                        px += ix;
+                    }
+                    // apply immediate horizontal correction
+                    enemy.x = px;
+                    enemy.vx = -enemy.vx; // reverse direction on collision
+                    if (enemy.vx < 0) enemy.facingLeft = false;
+                    else enemy.facingLeft = true;
+                } else {
+                    // vertical push
+                    if (top + ph * 0.5f < ty + cellH * 0.5f) {
+                        // collision from above -> place on top
+                        top = ty - ph;
+                        enemy.vy = 0.0f;
+                        enemy.onGround = true;
+                    } else {
+                        // collision from below
+                        top += iy;
+                        if (enemy.vy < 0.0f) enemy.vy = 0.0f;
+                    }
+                    enemy.y = top + ph;
+                }
+            }
+        }
+    }
 }
 
 int main(int argc, char* argv[]) {
@@ -114,6 +207,13 @@ int main(int argc, char* argv[]) {
 
     if(TTF_Init() != 0){
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "TTF_Init failed: %s", TTF_GetError());
+    }
+
+    // Initialize SDL_mixer
+    if(Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0){
+        SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "SDL_mixer could not initialize! SDL_mixer Error: %s\n", Mix_GetError());
+        // Perhaps exit if audio is critical
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio Error", "Failed to initialize audio. The game may not have sound.", nullptr);
     }
 
     // Scaling fix (WIP)
@@ -138,8 +238,30 @@ int main(int argc, char* argv[]) {
         assetsDir = "assets/";
     }
 
+    // Load audio
+    Mix_Music* menuMusic = Mix_LoadMUS((assetsDir + "menu_muzyka.mp3").c_str());
+    Mix_Music* levelMusic = Mix_LoadMUS((assetsDir + "muzyczkaa_poziomy.mp3").c_str());
+    Mix_Chunk* deadSound = Mix_LoadWAV((assetsDir + "deadzik.mp3").c_str());
+    Mix_Chunk* pickSound = Mix_LoadWAV((assetsDir + "pick_up.mp3").c_str());
+    Mix_Chunk* stepSound = Mix_LoadWAV((assetsDir + "step.mp3").c_str());
+
+    if (!menuMusic) SDL_Log("Failed to load menu music: %s", Mix_GetError());
+    if (!levelMusic) SDL_Log("Failed to load level music: %s", Mix_GetError());
+    if (!deadSound) SDL_Log("Failed to load dead sound: %s", Mix_GetError());
+    if (!pickSound) SDL_Log("Failed to load pick sound: %s", Mix_GetError());
+    if (!stepSound) SDL_Log("Failed to load step sound: %s", Mix_GetError());
+
+    // Set global pointers
+    globalPickSound = pickSound;
+    globalStepSound = stepSound;
+    globalDeadSound = deadSound;
+
+    // Set volumes
+    Mix_VolumeMusic(128); // max volume for music
+    Mix_Volume(-1, 128);  // max volume for chunks
+
     TTF_Font* hudFont = nullptr;
-    std::string hudFontPath = (assetsDir + "DejaVuSans.ttf");
+    std::string hudFontPath = (assetsDir + "BreeSerif-Regular.otf");
     hudFont = TTF_OpenFont(hudFontPath.c_str(), 24); // larger for game over screens
     if(!hudFont){
         SDL_LogWarn(SDL_LOG_CATEGORY_APPLICATION, "HUD font not opened: %s", TTF_GetError());
@@ -148,10 +270,16 @@ int main(int argc, char* argv[]) {
 
     // Main game loop
     while (true) {
+        // Play menu music
+        if (menuMusic) Mix_PlayMusic(menuMusic, -1);
+
         // Show main menu
         MainMenu mainMenu(ren, assetsDir);
         int selectedLevel = mainMenu.run();
         if (selectedLevel == -1) break; // kill
+
+        // Play level music (replaces menu music)
+        if (levelMusic) Mix_PlayMusic(levelMusic, -1);
 
         std::string bgFile = "poziom_" + std::to_string(selectedLevel) + "_tlo.jpg";
 
@@ -159,10 +287,24 @@ int main(int argc, char* argv[]) {
         Texture bgTex;
         bgTex.load(ren, (assetsDir + bgFile).c_str());
 
-        Texture f1,f2,f3;
+        Texture f1,f2,f3,f4,f5,f6;
         f1.load(ren, (assetsDir + "chodzenie_1.png").c_str());
         f2.load(ren, (assetsDir + "chodzenie_2.png").c_str());
         f3.load(ren, (assetsDir + "chodzenie_3.png").c_str());
+        f4.load(ren, (assetsDir + "ochroniarz_1.png").c_str());
+        f5.load(ren, (assetsDir + "ochroniarz_2.png").c_str());
+        f6.load(ren, (assetsDir + "ochroniarz_3.png").c_str());
+
+        // Load pickup textures
+        Texture piwo1, piwo2, piwoKufel, pollitroka, piwoButelka, woda, pollitrowka1, pollitrowka2;
+        piwo1.load(ren, (assetsDir + "piwo_1.png").c_str());
+        piwo2.load(ren, (assetsDir + "piwo_2.png").c_str());
+        piwoKufel.load(ren, (assetsDir + "piwo_w_kuflu.png").c_str());
+        pollitroka.load(ren, (assetsDir + "pollitroka_1.png").c_str());
+        piwoButelka.load(ren, (assetsDir + "piwo_w_butelce.png").c_str());
+        woda.load(ren, (assetsDir + "woda.png").c_str());
+        pollitrowka1.load(ren, (assetsDir + "pollitrowka_1.png").c_str());
+        pollitrowka2.load(ren, (assetsDir + "pollitrowka_2.png").c_str());
 
         // Abort gracefully if required textures are missing
         if (!bgTex.tex || !f1.tex || !f2.tex || !f3.tex) {
@@ -172,9 +314,16 @@ int main(int argc, char* argv[]) {
             continue; // back to menu
         }
 
+        // Play level music
+        if (levelMusic) Mix_PlayMusic(levelMusic, -1);
+
         // Use logical WINW/WINH for level/frame sizing and rendering math
         Level level;
         level.setFrameSize(WINW, WINH);
+
+        // Ensure rows is initialized before allocating the grid (tile size = 32)
+        level.rows = WINH / 32 + 1;
+
         level.cols = 156; // map size
         level.grid.assign(level.rows, std::vector<int>(level.cols, 0));
         SDL_Log("DBG: level frame size set to %dx%d", WINW, WINH);
@@ -202,8 +351,27 @@ int main(int argc, char* argv[]) {
         player.onGround = true;
         player.vy = 0.0f;
 
-        level.backgroundPath = assetsDir + bgFile;
-        level.usedAssets = { assetsDir + "chodzenie_1.png", assetsDir + "chodzenie_2.png", assetsDir + "chodzenie_3.png" };
+        level.backgroundPath = bgFile;
+        level.usedAssets = { assetsDir + "chodzenie_1.png", assetsDir + "chodzenie_2.png", assetsDir + "chodzenie_3.png", assetsDir + "ochroniarz_1.png", assetsDir + "ochroniarz_2.png", assetsDir + "ochroniarz_3.png", assetsDir + "piwo_1.png", assetsDir + "piwo_2.png", assetsDir + "piwo_w_kuflu.png", assetsDir + "pollitroka_1.png", assetsDir + "piwo_w_butelce.png", assetsDir + "woda.png", assetsDir + "pollitrowka_1.png", assetsDir + "pollitrowka_2.png" };
+
+        // Populate enemies from grid
+        std::vector<Enemy> enemies;
+        for (int r = 0; r < level.rows; ++r) {
+            for (int c = 0; c < level.cols; ++c) {
+                if (level.grid[r][c] == 5) {
+                    Enemy e;
+                    e.frames = { &f4, &f5, &f6 };
+                    e.width = 32; e.height = 48;
+                    e.x = c * 32.0f;
+                    e.y = (r + 1) * 32.0f; // on top of tile
+                    e.vx = 50.f;
+                    e.vy = 0.f;
+                    e.onGround = true;
+                    enemies.push_back(e);
+                    // level.grid[r][c] = 0; // keep marker
+                }
+            }
+        }
 
         const float editorTileScale = 1.0f;   // used only by LevelEditor
         const float renderTileScale = 1.0f;   // used for runtime drawing / player size scaling
@@ -215,12 +383,25 @@ int main(int argc, char* argv[]) {
         float editorCamX = 0.0f;
 
         // Menu setup
-        Menu menu(ren, (assetsDir + "DejaVuSans.ttf").c_str(), 18);
+        Menu menu(ren, (assetsDir + "BreeSerif-Regular.otf").c_str(), 18);
         menu.addItem("Reload textures", [&](){
             f1.load(ren, (assetsDir + "chodzenie_1.png").c_str());
             f2.load(ren, (assetsDir + "chodzenie_2.png").c_str());
             f3.load(ren, (assetsDir + "chodzenie_3.png").c_str());
-            bgTex.load(ren, (assetsDir + "poziom_0_tlo.jpg").c_str());
+            f4.load(ren, (assetsDir + "ochroniarz_1.png").c_str());
+            f5.load(ren, (assetsDir + "ochroniarz_2.png").c_str());
+            f6.load(ren, (assetsDir + "ochroniarz_3.png").c_str());
+            piwo1.load(ren, (assetsDir + "piwo_1.png").c_str());
+            piwo2.load(ren, (assetsDir + "piwo_2.png").c_str());
+            piwoKufel.load(ren, (assetsDir + "piwo_w_kuflu.png").c_str());
+            pollitroka.load(ren, (assetsDir + "pollitroka_1.png").c_str());
+            piwoButelka.load(ren, (assetsDir + "piwo_w_butelce.png").c_str());
+            woda.load(ren, (assetsDir + "woda.png").c_str());
+            pollitrowka1.load(ren, (assetsDir + "pollitrowka_1.png").c_str());
+            pollitrowka2.load(ren, (assetsDir + "pollitrowka_2.png").c_str());
+
+            // Reload background texture
+            bgTex.load(ren, (assetsDir + level.backgroundPath).c_str());
             level.setBackgroundTexture(bgTex.tex);
             level.setBackgroundRepeat(false);
             level.setScrollSpeed(0.0f);
@@ -229,8 +410,129 @@ int main(int argc, char* argv[]) {
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Menu", "Textures reloaded", win);
     });
         menu.addItem("Save level", [&](){
+            level.enemyPositions.clear();
+            for (int r = 0; r < level.rows; ++r) {
+                for (int c = 0; c < level.cols; ++c) {
+                    if (level.grid[r][c] == 5) {
+                        level.enemyPositions.push_back({r, c});
+                    }
+                }
+            }
             level.saveToZip("level_saved.zip");
             SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Menu", "Level saved", win);
+        });
+
+        menu.addItem("Load level", [&](){
+            // Backup current level state
+            int oldRows = level.rows;
+            int oldCols = level.cols;
+            auto oldGrid = level.grid;
+            std::string oldBgPath = level.backgroundPath;
+            std::vector<std::string> oldUsedAssets = level.usedAssets;
+
+            if (level.loadFromFile("level_saved.zip")) {
+                // Reload background texture
+                bgTex.load(ren, (assetsDir + level.backgroundPath).c_str());
+                level.setBackgroundTexture(bgTex.tex);
+                level.setBackgroundRepeat(false);
+                level.setScrollSpeed(0.0f);
+                level.setParallax(0.25f);
+                level.setBackgroundMaxSpeed(50.0f);
+                // Recreate editor with new level size
+                delete editor;
+                editor = new LevelEditor(&level, WINW, WINH, editorTileScale, baseTilePixels);
+                // Reset player position
+                player.x = 10.f;
+                int levelH = level.rows * 32;
+                player.y = static_cast<float>(std::max(0, levelH - player.height));
+                player.onGround = true;
+                player.vy = 0.0f;
+                // Reset camera
+                camX = 0.0f;
+                editorCamX = 0.0f;
+                // Repopulate enemies from the loaded grid
+                enemies.clear();
+                for (auto& p : level.enemyPositions) {
+                    if (p.first >= 0 && p.first < level.rows && p.second >= 0 && p.second < level.cols) {
+                        level.grid[p.first][p.second] = 5;
+                    }
+                }
+                for (int r = 0; r < level.rows; ++r) {
+                    for (int c = 0; c < level.cols; ++c) {
+                        if (level.grid[r][c] == 5) {
+                            Enemy e;
+                            e.frames = { &f4, &f5, &f6 };
+                            e.width = 32; e.height = 48;
+                            e.x = c * 32.0f;
+                            e.y = (r + 1) * 32.0f;
+                            e.vx = 50.f;
+                            e.vy = 0.f;
+                            e.onGround = true;
+                            enemies.push_back(e);
+                            // level.grid[r][c] = 0;
+                        }
+                    }
+                }
+                SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Menu", "Level loaded", win);
+            } else {
+                // Restore level state on failure
+                level.rows = oldRows;
+                level.cols = oldCols;
+                level.grid = oldGrid;
+                level.backgroundPath = oldBgPath;
+                level.usedAssets = oldUsedAssets;
+                SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Menu", "Failed to load level", win);
+            }
+        });
+
+        menu.addItem("Reload level", [&](){
+            if (level.loadFromFile("level_saved.zip")) {
+                // Reload background texture
+                bgTex.load(ren, (assetsDir + level.backgroundPath).c_str());
+                level.setBackgroundTexture(bgTex.tex);
+                level.setBackgroundRepeat(false);
+                level.setScrollSpeed(0.0f);
+                level.setParallax(0.25f);
+                level.setBackgroundMaxSpeed(50.0f);
+                // Recreate editor with new level size
+                delete editor;
+                editor = new LevelEditor(&level, WINW, WINH, editorTileScale, baseTilePixels);
+                // Reset player position
+                player.x = 10.f;
+                int levelH = level.rows * 32;
+                player.y = static_cast<float>(std::max(0, levelH - player.height));
+                player.onGround = true;
+                player.vy = 0.0f;
+                // Reset camera
+                camX = 0.0f;
+                editorCamX = 0.0f;
+                // Repopulate enemies from the loaded grid
+                enemies.clear();
+                for (auto& p : level.enemyPositions) {
+                    if (p.first >= 0 && p.first < level.rows && p.second >= 0 && p.second < level.cols) {
+                        level.grid[p.first][p.second] = 5;
+                    }
+                }
+                for (int r = 0; r < level.rows; ++r) {
+                    for (int c = 0; c < level.cols; ++c) {
+                        if (level.grid[r][c] == 5) {
+                            Enemy e;
+                            e.frames = { &f4, &f5, &f6 };
+                            e.width = 32; e.height = 48;
+                            e.x = c * 32.0f;
+                            e.y = (r + 1) * 32.0f;
+                            e.vx = 50.f;
+                            e.vy = 0.f;
+                            e.onGround = true;
+                            enemies.push_back(e);
+                            // level.grid[r][c] = 0;
+                        }
+                    }
+                }
+                SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Menu", "Level reloaded", win);
+            } else {
+                SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Menu", "Failed to reload level", win);
+            }
         });
 
         bool running = true;
@@ -242,9 +544,26 @@ int main(int argc, char* argv[]) {
 
         // Game loop
         while(running) {
+            static int pickupFrame = 0;
+            static float stepCooldown = 0.0f;
+            static double fpsTimer = 0.0;
+            static std::string currentFpsText = "FPS: 60";
+            pickupFrame++;
+
             Uint64 now = SDL_GetPerformanceCounter();
             double dt = (double)(now - last) / (double)SDL_GetPerformanceFrequency();
             last = now;
+
+            stepCooldown -= dt;
+            fpsTimer += dt;
+
+            // Update current FPS text every 0.5 seconds
+            if (fpsTimer >= 0.5) {
+                int currentFps = static_cast<int>(1.0 / dt);
+                currentFpsText = "FPS: " + std::to_string(currentFps);
+                fpsTimer = 0.0;
+            }
+
 
             SDL_Event ev;
             while (SDL_PollEvent(&ev)) {
@@ -268,7 +587,43 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (ev.type == SDL_KEYDOWN) {
-                    if (ev.key.keysym.scancode == SDL_SCANCODE_E) { editMode = !editMode; if (editMode) editorCamX = camX; continue; }
+                    if (ev.key.keysym.scancode == SDL_SCANCODE_E) {
+                    editMode = !editMode;
+                    if (editMode) {
+                        editorCamX = camX;
+                        // Show enemy spawns in grid
+                        for (auto& p : level.enemyPositions) {
+                            if (p.first >= 0 && p.first < level.rows && p.second >= 0 && p.second < level.cols) {
+                                level.grid[p.first][p.second] = 5;
+                            }
+                        }
+                    } else {
+                        // Update enemyPositions from grid
+                        level.enemyPositions.clear();
+                        for (int r = 0; r < level.rows; ++r) {
+                            for (int c = 0; c < level.cols; ++c) {
+                                if (level.grid[r][c] == 5) {
+                                    level.enemyPositions.push_back({r, c});
+                                }
+                            }
+                        }
+                        // Repopulate enemies from grid
+                        enemies.clear();
+                        for (auto& p : level.enemyPositions) {
+                            Enemy e;
+                            e.frames = { &f4, &f5, &f6 };
+                            e.width = 32; e.height = 48;
+                            e.x = p.second * 32.0f;
+                            e.y = (p.first + 1) * 32.0f;
+                            e.vx = 50.f;
+                            e.vy = 0.f;
+                            e.onGround = true;
+                            enemies.push_back(e);
+                            level.grid[p.first][p.second] = 5; // remember
+                        }
+                    }
+                    continue;
+                }
                     if (ev.key.keysym.scancode == SDL_SCANCODE_S && (SDL_GetModState() & KMOD_CTRL)) {
                         level.saveToZip("level_saved.zip");
                         continue;
@@ -331,7 +686,22 @@ int main(int argc, char* argv[]) {
 
             // frame update & render
             const Uint8* kb = SDL_GetKeyboardState(nullptr);
+            int levelW = level.cols * baseTilePixels;
+            int physCellW = baseTilePixels;
+            int physCellH = baseTilePixels;
             if (!editMode && !playerLost && !playerWon) player.update(dt, kb);
+            if (!editMode && player.onGround && fabs(player.vx) > 0.1f && stepCooldown <= 0.0f) {
+                if (globalStepSound) Mix_PlayChannel(-1, globalStepSound, 0);
+                stepCooldown = 0.75f;
+            }
+            if (!editMode && !playerLost && !playerWon) {
+                for (auto& e : enemies) {
+                    e.update(dt, levelW);
+                }
+                for (auto& e : enemies) {
+                    resolveEnemyCollisions(e, level, physCellW, physCellH);
+                }
+            }
 
             if (editMode) {
                 if (kb[SDL_SCANCODE_LEFT]) editorCamX -= 2000.0f * dt;
@@ -346,11 +716,10 @@ int main(int argc, char* argv[]) {
 
             int renderCellW = std::max(1, (int)(baseTilePixels * renderTileScale + 0.5f));
             int renderCellH = renderCellW;
-            int physCellW = baseTilePixels;
-            int physCellH = baseTilePixels;
+
             float renderScale = (float)renderCellW / (float)physCellW;
 
-            int levelW = level.cols * physCellW;
+
             int levelH_now = level.rows * physCellH;
 
             int worldW = std::max(levelW, winW);
@@ -359,11 +728,31 @@ int main(int argc, char* argv[]) {
             if (!editMode && !playerLost && !playerWon) {
                 resolvePlayerCollisions(player, level, physCellW , physCellH);
 
+                // Check collision with enemy
+                for (auto& enemy : enemies) {
+                    float ex = enemy.x;
+                    float ew = enemy.width;
+                    float et = enemy.y;
+                    float eh = enemy.height;
+                    float px = player.x;
+                    float pw = player.width;
+                    float pt = player.y - player.height;
+                    float ph = player.height;
+                    if (px < ex + ew && px + pw > ex && pt < et + eh && pt + ph > et) {
+                        if (player.invulnTimer <= 0.0f) {
+                            player.health -= 1;
+                            player.invulnTimer = player.invuln;
+                            if (player.health < 0) player.health = 0;
+                        }
+                    }
+                }
+
                 // Check for game over conditions
                 if (player.health <= 0) {
                     playerLost = true;
                     fade = 0.0f;
                     running = false;
+                    if (globalDeadSound) Mix_PlayChannel(-1, globalDeadSound, 0);
                 }
                 if (player.x >= levelW - player.width) {
                     playerWon = true;
@@ -444,12 +833,95 @@ int main(int argc, char* argv[]) {
                             SDL_RenderFillRect(ren, &dst);
                             break;
                         case 2:
-                            SDL_SetRenderDrawColor(ren, 160, 40, 40, 255);
-                            SDL_RenderFillRect(ren, &dst);
+                            {
+                                int texW, texH;
+                                SDL_QueryTexture(woda.tex, nullptr, nullptr, &texW, &texH);
+                                float aspect = (float)texW / texH;
+                                int renderH = renderCellH;
+                                int renderW = (int)(renderH * aspect + 0.5f);
+                                int offsetX = (renderCellW - renderW) / 2;
+                                SDL_Rect dst{ tileX_render + offsetX, tileY_render, renderW, renderH };
+                                SDL_RenderCopy(ren, woda.tex, nullptr, &dst);
+                            }
                             break;
                         case 3:
-                            SDL_SetRenderDrawColor(ren, 200, 200, 60, 255);
-                            SDL_RenderFillRect(ren, &dst);
+                            {
+                                int texW, texH;
+                                SDL_QueryTexture(piwo1.tex, nullptr, nullptr, &texW, &texH);
+                                float aspect = (float)texW / texH;
+                                int renderH = renderCellH;
+                                int renderW = (int)(renderH * aspect + 0.5f);
+                                int offsetX = (renderCellW - renderW) / 2;
+                                SDL_Rect dst{ tileX_render + offsetX, tileY_render, renderW, renderH };
+                                SDL_RenderCopy(ren, piwo1.tex, nullptr, &dst);
+                            }
+                            break;
+                        case 4:
+                            {
+                                int texW, texH;
+                                SDL_QueryTexture(piwo2.tex, nullptr, nullptr, &texW, &texH);
+                                float aspect = (float)texW / texH;
+                                int renderH = renderCellH;
+                                int renderW = (int)(renderH * aspect + 0.5f);
+                                int offsetX = (renderCellW - renderW) / 2;
+                                SDL_Rect dst{ tileX_render + offsetX, tileY_render, renderW, renderH };
+                                SDL_RenderCopy(ren, piwo2.tex, nullptr, &dst);
+                            }
+                            break;
+                        case 5:
+                            if (editMode) {
+                                SDL_SetRenderDrawColor(ren, 255, 0, 0, 255);
+                                SDL_RenderFillRect(ren, &dst);
+                            }
+                            break;
+                        case 6:
+                            {
+                                int texW, texH;
+                                SDL_QueryTexture(piwoKufel.tex, nullptr, nullptr, &texW, &texH);
+                                float aspect = (float)texW / texH;
+                                int renderH = renderCellH;
+                                int renderW = (int)(renderH * aspect + 0.5f);
+                                int offsetX = (renderCellW - renderW) / 2;
+                                SDL_Rect dst{ tileX_render + offsetX, tileY_render, renderW, renderH };
+                                SDL_RenderCopy(ren, piwoKufel.tex, nullptr, &dst);
+                            }
+                            break;
+                        case 7:
+                            {
+                                int texW, texH;
+                                SDL_QueryTexture(pollitroka.tex, nullptr, nullptr, &texW, &texH);
+                                float aspect = (float)texW / texH;
+                                int renderH = renderCellH;
+                                int renderW = (int)(renderH * aspect + 0.5f);
+                                int offsetX = (renderCellW - renderW) / 2;
+                                SDL_Rect dst{ tileX_render + offsetX, tileY_render, renderW, renderH };
+                                SDL_RenderCopy(ren, pollitroka.tex, nullptr, &dst);
+                            }
+                            break;
+                        case 8:
+                            {
+                                int texW, texH;
+                                SDL_QueryTexture(piwoButelka.tex, nullptr, nullptr, &texW, &texH);
+                                float aspect = (float)texW / texH;
+                                int renderH = renderCellH;
+                                int renderW = (int)(renderH * aspect + 0.5f);
+                                int offsetX = (renderCellW - renderW) / 2;
+                                SDL_Rect dst{ tileX_render + offsetX, tileY_render, renderW, renderH };
+                                SDL_RenderCopy(ren, piwoButelka.tex, nullptr, &dst);
+                            }
+                            break;
+                        case 9:
+                            {
+                                Texture* tex = ((r + c) % 2 == 0) ? &pollitrowka1 : &pollitrowka2;
+                                int texW, texH;
+                                SDL_QueryTexture(tex->tex, nullptr, nullptr, &texW, &texH);
+                                float aspect = (float)texW / texH;
+                                int renderH = renderCellH;
+                                int renderW = (int)(renderH * aspect + 0.5f);
+                                int offsetX = (renderCellW - renderW) / 2;
+                                SDL_Rect dst{ tileX_render + offsetX, tileY_render, renderW, renderH };
+                                SDL_RenderCopy(ren, tex->tex, nullptr, &dst);
+                            }
                             break;
                         default:
                             SDL_SetRenderDrawColor(ren, 100, 100, 100, 255);
@@ -462,6 +934,11 @@ int main(int argc, char* argv[]) {
             // render player once using same camX_render
             player.render(ren, camX_render, 0, renderScale);
 
+            // render enemies
+            for (auto& enemy : enemies) {
+                enemy.render(ren, camX_render, 0, renderScale);
+            }
+
             // HUD/menu rendering
             menu.render();
 
@@ -469,8 +946,9 @@ int main(int argc, char* argv[]) {
                 SDL_Color color = {0, 0, 0, 255};
                 std::string scoreText = "Punkty: " + std::to_string(player.score);
                 std::string healthText = "HP: " + std::to_string(player.health);
+                std::string fpsText = "FPS: " + std::to_string((int)(1.0 / dt));
 
-                SDL_Surface* surf1 = TTF_RenderText_Blended(hudFont, scoreText.c_str(), color);
+                SDL_Surface* surf1 = TTF_RenderUTF8_Blended(hudFont, scoreText.c_str(), color);
                 if (surf1) {
                     SDL_Texture* tex1 = SDL_CreateTextureFromSurface(ren, surf1);
                     if (tex1) {
@@ -483,7 +961,7 @@ int main(int argc, char* argv[]) {
                     SDL_FreeSurface(surf1);
                 }
 
-                SDL_Surface* surf2 = TTF_RenderText_Blended(hudFont, healthText.c_str(), color);
+                SDL_Surface* surf2 = TTF_RenderUTF8_Blended(hudFont, healthText.c_str(), color);
                 if (surf2) {
                     SDL_Texture* tex2 = SDL_CreateTextureFromSurface(ren, surf2);
                     if (tex2) {
@@ -495,11 +973,25 @@ int main(int argc, char* argv[]) {
                     }
                     SDL_FreeSurface(surf2);
                 }
+
+                SDL_Color green = {0, 255, 0, 255};
+                SDL_Surface* surf3 = TTF_RenderUTF8_Blended(hudFont, currentFpsText.c_str(), green);
+                if (surf3) {
+                    SDL_Texture* tex3 = SDL_CreateTextureFromSurface(ren, surf3);
+                    if (tex3) {
+                        int w, h;
+                        SDL_QueryTexture(tex3, nullptr, nullptr, &w, &h);
+                        SDL_Rect dst = {WINW / 2 - w / 2, 10, w, h};
+                        SDL_RenderCopy(ren, tex3, nullptr, &dst);
+                        SDL_DestroyTexture(tex3);
+                    }
+                    SDL_FreeSurface(surf3);
+                }
             }
 
             if (editMode) {
                 SDL_Color color = {0, 0, 0, 255};
-                SDL_Surface* surf = TTF_RenderText_Blended(hudFont, "Edytor: strza\u0142ki - ruch, lewy myszki - klocek (cykluje warto\u015Bciami)", color);
+                SDL_Surface* surf = TTF_RenderUTF8_Blended(hudFont, "Edytor: strzałki - ruch, lewy myszki - klocek (0=pusty,1=twardy,2=szkodliwy,3=bonus,5=wróg)", color);
                 if (surf) {
                     SDL_Texture* tex = SDL_CreateTextureFromSurface(ren, surf);
                     if (tex) {
@@ -522,7 +1014,7 @@ int main(int argc, char* argv[]) {
                 SDL_RenderFillRect(ren, nullptr);
 
                 SDL_Color color = {255, 0, 0, 255};
-                SDL_Surface* surf = TTF_RenderText_Blended(hudFont, "Przegra\u0142e\u015B", color);
+                SDL_Surface* surf = TTF_RenderUTF8_Blended(hudFont, "Przegrałeś", color);
                 if (surf) {
                     SDL_Texture* tex = SDL_CreateTextureFromSurface(ren, surf);
                     if (tex) {
@@ -539,7 +1031,7 @@ int main(int argc, char* argv[]) {
                 SDL_RenderFillRect(ren, nullptr);
 
                 SDL_Color color = {255, 215, 0, 255};
-                SDL_Surface* surf = TTF_RenderText_Blended(hudFont, "Wygrałeś", color);
+                SDL_Surface* surf = TTF_RenderUTF8_Blended(hudFont, "Wygrałeś", color);
                 if (surf) {
                     SDL_Texture* tex = SDL_CreateTextureFromSurface(ren, surf);
                     if (tex) {
@@ -556,6 +1048,9 @@ int main(int argc, char* argv[]) {
             SDL_RenderPresent(ren);
             SDL_Delay(5);
         }
+
+        // Halt music
+        Mix_HaltMusic();
 
         // Wait for enter to return to menu
         bool waiting = true;
@@ -574,7 +1069,7 @@ int main(int argc, char* argv[]) {
                 SDL_SetRenderDrawColor(ren, 0, 0, 0, 255);
                 SDL_RenderFillRect(ren, nullptr);
                 SDL_Color color = {255, 0, 0, 255};
-                SDL_Surface* surf = TTF_RenderText_Blended(hudFont, "Przegra\u0142e\u015B", color);
+                SDL_Surface* surf = TTF_RenderUTF8_Blended(hudFont, "Przegrałeś", color);
                 if (surf) {
                     SDL_Texture* tex = SDL_CreateTextureFromSurface(ren, surf);
                     if (tex) {
@@ -590,7 +1085,7 @@ int main(int argc, char* argv[]) {
                 SDL_SetRenderDrawColor(ren, 102, 51, 153, 255);
                 SDL_RenderFillRect(ren, nullptr);
                 SDL_Color color = {255, 215, 0, 255};
-                SDL_Surface* surf = TTF_RenderText_Blended(hudFont, "Wygrałeś", color);
+                SDL_Surface* surf = TTF_RenderUTF8_Blended(hudFont, "Wygrałeś", color);
                 if (surf) {
                     SDL_Texture* tex = SDL_CreateTextureFromSurface(ren, surf);
                     if (tex) {
@@ -608,6 +1103,9 @@ int main(int argc, char* argv[]) {
             SDL_Delay(16);
         }
 
+        // Halt music again if needed
+        Mix_HaltMusic();
+
         // Cleanup for this level
         delete editor;
         editor = nullptr;
@@ -615,10 +1113,14 @@ int main(int argc, char* argv[]) {
 
     // cleanup
     if(hudFont) TTF_CloseFont(hudFont);
-    SDL_DestroyRenderer(ren);
-    SDL_DestroyWindow(win);
+    Mix_FreeMusic(menuMusic);
+    Mix_FreeMusic(levelMusic);
+    Mix_FreeChunk(deadSound);
+    Mix_FreeChunk(pickSound);
+    Mix_FreeChunk(stepSound);
     TTF_Quit();
     IMG_Quit();
+    Mix_CloseAudio();
     SDL_Quit();
     return 0;
 }

@@ -5,7 +5,7 @@
 class Player {
 public:
     float x = 100.f, y = 800.f;
-    float vy = 0.f;
+    float vx = 0.f, vy = 0.f;
     bool onGround = false;
     std::vector<Texture*> frames;
     int curFrame = 0;
@@ -16,7 +16,7 @@ public:
     // Stats
     int health = 3;
     int score = 0;
-    float invuln = 0.5f;      // seconds of invulnerability after taking damage
+    float invuln = 1.5f;      // seconds of invulnerability after taking damage
     float invulnTimer = 0.0f; // timer for invulnerability
     bool facingLeft = false;
 

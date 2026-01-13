@@ -5,6 +5,7 @@
 #include <sstream>
 #include <algorithm>
 #include <limits>
+#include <cstdio>
 
 Level::Level()
     : bgTexture(nullptr)
@@ -159,6 +160,7 @@ void Level::updateBackground(float dt) {
 
     float scale = static_cast<float>(frameHeight) / static_cast<float>(texH);
     int scaledW = static_cast<int>(texW * scale);
+    int scaledH = frameHeight;
     if (scaledW <= 0) return;
 
     bgOffset += scrollSpeed * dt;
@@ -230,7 +232,8 @@ void Level::ensureCell(int r, int c) {
 bool Level::saveToZip(const std::string& path) const {
     // For build/time reasons this writes a plain JSON-like dump to the given path.
     // Replace with a real .zip writer (minizip, libzip, etc.) when desired.
-    std::ofstream ofs(path, std::ios::binary);
+    std::string tempPath = path + ".tmp";
+    std::ofstream ofs(tempPath, std::ios::binary);
     if (!ofs) return false;
 
     std::ostringstream ss;
@@ -257,10 +260,135 @@ bool Level::saveToZip(const std::string& path) const {
         if (r < rows - 1) ss << ",";
         ss << "\n";
     }
-    ss << "  ]\n";
+    ss << "  ],\n";
+    ss << "  \"enemyPositions\": [";
+    for (size_t i = 0; i < enemyPositions.size(); ++i) {
+        if (i) ss << ", ";
+        ss << "[" << enemyPositions[i].first << "," << enemyPositions[i].second << "]";
+    }
+    ss << "]\n";
     ss << "}\n";
 
     std::string data = ss.str();
     ofs.write(data.data(), static_cast<std::streamsize>(data.size()));
-    return ofs.good();
+    ofs.close();
+    if (ofs.good()) {
+        if (std::rename(tempPath.c_str(), path.c_str()) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Level::loadFromFile(const std::string& path) {
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) return false;
+
+    std::string content((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+    if (content.empty()) return false;
+
+    // Simple JSON parser for the format we save
+    size_t pos = 0;
+
+    // Skip to "rows"
+    pos = content.find("\"rows\":", pos);
+    if (pos == std::string::npos) return false;
+    pos += 7;
+    try {
+        rows = std::stoi(content.substr(pos));
+    } catch (...) {
+        return false;
+    }
+    if (rows <= 0) return false;
+
+    // "cols"
+    pos = content.find("\"cols\":", pos);
+    if (pos == std::string::npos) return false;
+    pos += 7;
+    try {
+        cols = std::stoi(content.substr(pos));
+    } catch (...) {
+        return false;
+    }
+    if (cols <= 0) return false;
+
+    // "backgroundPath"
+    pos = content.find("\"backgroundPath\":", pos);
+    if (pos != std::string::npos) {
+        pos += 17;
+        size_t end = content.find("\"", pos);
+        if (end != std::string::npos) {
+            backgroundPath = content.substr(pos, end - pos);
+        }
+    }
+
+    // "usedAssets"
+    pos = content.find("\"usedAssets\":", pos);
+    if (pos != std::string::npos) {
+        pos += 13;
+        usedAssets.clear();
+        while (pos < content.size() && content[pos] != ']') {
+            if (content[pos] == '"') {
+                pos++;
+                size_t end = content.find("\"", pos);
+                if (end != std::string::npos) {
+                    usedAssets.push_back(content.substr(pos, end - pos));
+                    pos = end + 1;
+                }
+            } else {
+                pos++;
+            }
+        }
+    }
+
+    // "grid"
+    pos = content.find("\"grid\":", pos);
+    if (pos == std::string::npos) return false;
+    pos += 7;
+    grid.assign(rows, std::vector<int>(cols, 0));
+    for (int r = 0; r < rows; ++r) {
+        // Skip to [
+        while (pos < content.size() && content[pos] != '[') pos++;
+        if (pos >= content.size()) return false;
+        pos++;
+        for (int c = 0; c < cols; ++c) {
+            // Skip commas and spaces
+            while (pos < content.size() && (content[pos] == ',' || content[pos] == ' ' || content[pos] == '\n' || content[pos] == '\t')) pos++;
+            if (pos >= content.size()) return false;
+            size_t end = pos;
+            while (end < content.size() && content[end] != ',' && content[end] != ']' && content[end] != ' ' && content[end] != '\n' && content[end] != '\t') end++;
+            try {
+                grid[r][c] = std::stoi(content.substr(pos, end - pos));
+            } catch (...) {
+                return false;
+            }
+            pos = end;
+        }
+        // Skip to next row or end
+        while (pos < content.size() && content[pos] != ']' && content[pos] != ',') pos++;
+        if (content[pos] == ',') pos++;
+    }
+
+    // "enemyPositions"
+    pos = content.find("\"enemyPositions\":", pos);
+    if (pos != std::string::npos) {
+        pos += 17;
+        enemyPositions.clear();
+        while (pos < content.size() && content[pos] != ']') {
+            if (content[pos] == '[') {
+                pos++;
+                int r = std::stoi(content.substr(pos));
+                while (pos < content.size() && content[pos] != ',') pos++;
+                pos++;
+                int c = std::stoi(content.substr(pos));
+                enemyPositions.push_back({r, c});
+                while (pos < content.size() && content[pos] != ']') pos++;
+                pos++;
+            } else {
+                pos++;
+            }
+        }
+    }
+
+    return true;
 }

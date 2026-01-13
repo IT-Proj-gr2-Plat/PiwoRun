@@ -9,6 +9,7 @@ void Player::update(double dt, const Uint8* kb){
     bool moving = false;
     if(kb[SDL_SCANCODE_LEFT]){ vx -= speed * (float)dt; moving = true; }
     if(kb[SDL_SCANCODE_RIGHT]){ vx += speed * (float)dt; moving = true; }
+    this->vx = vx;
     x += vx;
     if(kb[SDL_SCANCODE_SPACE] && onGround){ vy = -450.f; onGround = false; }
     vy += 1200.f * (float)dt;

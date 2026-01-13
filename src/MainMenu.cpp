@@ -1,8 +1,11 @@
 #include "MainMenu.h"
 #include <SDL_image.h>
 #include <SDL.h>
+#include <SDL_mixer.h>
 #include <vector>
 #include <string>
+
+static bool isMuted = false;
 
 MainMenu::MainMenu(SDL_Renderer* ren, const std::string& assetsDir) : ren(ren), currentIndex(0) {
     std::vector<std::string> names = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "mute", "exit", "kill"};
@@ -35,7 +38,13 @@ int MainMenu::run() {
                     currentIndex = (currentIndex + 1) % textures.size();
                 } else if (ev.key.keysym.scancode == SDL_SCANCODE_RETURN || ev.key.keysym.scancode == SDL_SCANCODE_RETURN2) {
                     if (currentIndex == 9) { // mute
-                        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Menu", "Wyciszono muzykę", nullptr);
+                        isMuted = !isMuted;
+                        if (isMuted) {
+                            Mix_VolumeMusic(0);
+                        } else {
+                            Mix_VolumeMusic(128);
+                        }
+                        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_INFORMATION, "Menu", isMuted ? "Wyciszono muzykę" : "Włączono muzykę", nullptr);
                     } else if (currentIndex == 11) { // kill
                         return -1;
                     } else if (currentIndex == 10) { // exit

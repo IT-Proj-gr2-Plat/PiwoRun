@@ -40,6 +40,7 @@ public:
     std::vector<std::vector<int>> grid;
     std::string backgroundPath;
     std::vector<std::string> usedAssets;
+    std::vector<std::pair<int, int>> enemyPositions;
 
     // Editor helpers
     void toggleCell(int r, int c);
@@ -47,6 +48,7 @@ public:
 
     // Persist level
     bool saveToZip(const std::string& path) const;
+    bool loadFromFile(const std::string& path);
 
 private:
     SDL_Texture* bgTexture;
