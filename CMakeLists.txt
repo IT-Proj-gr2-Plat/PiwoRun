@@ -25,6 +25,9 @@ add_executable(projekcik
         src/Menu.cpp
         src/MainMenu.cpp
         src/Enemy.cpp
+        src/Boss.cpp
+        src/Collision.cpp
+        src/SaveData.cpp
         include/Menu.h
         include/MainMenu.h
         include/Enemy.h

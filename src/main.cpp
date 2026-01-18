@@ -3,7 +3,6 @@
 #include <SDL_ttf.h>
 #include <SDL_mixer.h>
 #include <iostream>
-#include <ctime>
 #include "Texture.h"
 #include "Player.h"
 #include "Level.h"
@@ -11,406 +10,23 @@
 #include "Menu.h"
 #include "MainMenu.h"
 #include "Enemy.h"
+#include "Boss.h"
+#include "GameObjects.h"
+#include "Collision.h"
+#include "SaveData.h"
 #include <algorithm>
 #include <cmath>
 #include <string>
 #include <vector>
-#include <cstdio>
-#include <fstream>
 #include <cstdint>
 #include <cstdlib>
 
-static Mix_Chunk* globalPickSound = nullptr;
-static Mix_Chunk* globalStepSound = nullptr;
-static Mix_Chunk* globalDeadSound = nullptr;
-
-struct Projectile {
-    float x, y, vx, vy;
-    Texture* tex;
-    bool active;
-    bool fromPlayer = false;
-    int width = 16, height = 16;
-    bool hasPhysics = true;
-    float lifetime = 0.0f;
-};
-
-struct Blood {
-    float x, y, vx, vy;
-    int lifetime;
-};
-
-struct SaveData {
-    uint32_t completedLevels = 0;
-    bool hasKey = false;
-};
-
-const char* SAVE_FILE = "dodatkowy_p_3.jpg";
-const uint8_t XOR_KEY = 0xAA;
-
-void saveProgress(const SaveData& data) {
-    std::vector<char> buf(sizeof(data));
-    memcpy(buf.data(), &data, sizeof(data));
-    for (auto& c : buf) c ^= XOR_KEY;
-    std::ofstream file(SAVE_FILE, std::ios::binary | std::ios::trunc);
-    if (file) {
-        file.write(buf.data(), buf.size());
-    }
-}
-
-SaveData loadProgress() {
-    SaveData data;
-    std::ifstream file(SAVE_FILE, std::ios::binary);
-    if (file) {
-        std::vector<char> buf(sizeof(data));
-        file.read(buf.data(), sizeof(data));
-        if (file.gcount() == sizeof(data)) {
-            for (auto& c : buf) c ^= XOR_KEY;
-            memcpy(&data, buf.data(), sizeof(data));
-        }
-    }
-    return data;
-}
+Mix_Chunk* globalPickSound = nullptr;
+Mix_Chunk* globalStepSound = nullptr;
+Mix_Chunk* globalDeadSound = nullptr;
 
 
-static void resolvePlayerCollisions(Player& player, Level& level, int cellW, int cellH, SaveData& saveData) {
-    if (cellW <= 0 || cellH <= 0) return;
-    if (level.rows <= 0 || level.cols <= 0) return;
 
-    const float eps = 0.0001f;
-
-    // Physics: player.x is left, player.y is _feet_ (bottom).
-    float px = player.x;
-    float pw = static_cast<float>(player.width);
-    float top = player.y - static_cast<float>(player.height);
-    float ph = static_cast<float>(player.height);
-
-    int minCol = (int)std::floor(px / cellW);
-    int maxCol = (int)std::floor((px + pw - eps) / cellW);
-    int minRow = (int)std::floor(top / cellH);
-    int maxRow = (int)std::floor((top + ph - eps) / cellH);
-
-    minCol = std::max(0, minCol);
-    minRow = std::max(0, minRow);
-    maxCol = std::min(level.cols - 1, maxCol);
-    maxRow = std::min(level.rows - 1, maxRow);
-
-    for (int r = minRow; r <= maxRow; ++r) {
-        if (r < 0 || r >= (int)level.grid.size()) continue;
-        for (int c = minCol; c <= maxCol; ++c) {
-            if (c < 0 || c >= (int)level.grid[r].size()) continue;
-
-            int cell = level.grid[r][c]; // 0=empty,1=solid,2=damaging,3=pickup,4=pickup,5=enemy spawn,6=pickup,7=pickup,8=heal,9=rolling pickup
-            if (cell == 0 || cell == 5 || cell == 3) continue; // non-solid and ignore enemy spawn markers
-
-            float tx = static_cast<float>(c * cellW);
-            float ty = static_cast<float>(r * cellH);
-
-            float ix = std::min(px + pw, tx + cellW) - std::max(px, tx);
-            float iy = std::min(top + ph, ty + cellH) - std::max(top, ty);
-
-            if (ix > 0.0f && iy > 0.0f) {
-                if (cell == 3 || cell == 4 || cell == 6 || cell == 7 || cell == 8 || cell == 9 || cell == 10) {
-                    if (cell == 8) {
-                        player.health += 1;
-                    } else if (cell == 9) {
-                        player.health += 1;
-                        int points = 5 + rand() % 6; // 5 to 10
-                        player.score += points;
-                    } else if (cell == 10) {
-                        saveData.hasKey = true;
-                        saveProgress(saveData);
-                    } else {
-                        int points = 5;
-                        if (cell == 4) points = 10;
-                        else if (cell == 6) points = 15;
-                        else if (cell == 7) points = 20;
-                        player.score += points;
-                    }
-                    level.grid[r][c] = 0; // remove pickup
-                    if (globalPickSound) Mix_PlayChannel(-1, globalPickSound, 0);
-                    continue;
-                }
-
-                bool isDamaging = (cell == 2);
-
-                // Resolve along smaller penetration (push player out)
-                if (ix < iy) {
-                    // horizontal push
-                    if (px + pw * 0.5f < tx + cellW * 0.5f) {
-                        // push left
-                        px -= ix;
-                    } else {
-                        // push right
-                        px += ix;
-                    }
-                    // apply immediate horizontal correction
-                    player.x = px;
-                } else {
-                    // vertical push
-                    if (top + ph * 0.5f < ty + cellH * 0.5f) {
-                        // collision from above -> place player on top of tile
-                        top = ty - ph;
-                        player.vy = 0.0f;
-                        player.onGround = true;
-                    } else {
-                        // collision from below -> push player down (head hit)
-                        top += iy;
-                        if (player.vy < 0.0f) player.vy = 0.0f;
-                    }
-                    // apply immediate vertical correction
-                    player.y = top + ph;
-                }
-
-                // Handle damage
-                if (isDamaging && player.invulnTimer <= 0.0f) {
-                    player.health -= 1;
-                    player.invulnTimer = player.invuln;
-                    if (player.health < 0) player.health = 0;
-                    level.grid[r][c] = 0; // remove damaging pickup
-                }
-            }
-        }
-    }
-
-    // Ensure the resolved values are applied
-    player.x = px;
-    player.y = top + ph;
-}
-
-static void resolveEnemyCollisions(Enemy& enemy, Level& level, int cellW, int cellH) {
-    if (cellW <= 0 || cellH <= 0) return;
-    if (level.rows <= 0 || level.cols <= 0) return;
-
-    const float eps = 0.0001f;
-
-    // Enemy physics: enemy.x is left, enemy.y is _feet_ (bottom).
-    float px = enemy.x;
-    float pw = static_cast<float>(enemy.width);
-    float top = enemy.y - static_cast<float>(enemy.height);
-    float ph = static_cast<float>(enemy.height);
-
-    int minCol = (int)std::floor(px / cellW);
-    int maxCol = (int)std::floor((px + pw - eps) / cellW);
-    int minRow = (int)std::floor(top / cellH);
-    int maxRow = (int)std::floor((top + ph - eps) / cellH);
-
-    minCol = std::max(0, minCol);
-    minRow = std::max(0, minRow);
-    maxCol = std::min(level.cols - 1, maxCol);
-    maxRow = std::min(level.rows - 1, maxRow);
-
-    for (int r = minRow; r <= maxRow; ++r) {
-        if (r < 0 || r >= (int)level.grid.size()) continue;
-        for (int c = minCol; c <= maxCol; ++c) {
-            if (c < 0 || c >= (int)level.grid[r].size()) continue;
-
-            int cell = level.grid[r][c]; // 0=empty,1=solid,2=damaging,3=pickup
-            if (cell != 1) continue; // only solid for enemy
-
-            float tx = static_cast<float>(c * cellW);
-            float ty = static_cast<float>(r * cellH);
-
-            float ix = std::min(px + pw, tx + cellW) - std::max(px, tx);
-            float iy = std::min(top + ph, ty + cellH) - std::max(top, ty);
-
-            if (ix > 0.0f && iy >= 0.0f) {
-                // Resolve along smaller penetration
-                if (ix < iy) {
-                    // horizontal push
-                    if (px + pw * 0.5f < tx + cellW * 0.5f) {
-                        // push left
-                        px -= ix;
-                    } else {
-                        // push right
-                        px += ix;
-                    }
-                    // apply immediate horizontal correction
-                    enemy.x = px;
-                    enemy.vx = -enemy.vx; // reverse direction on collision
-                    if (enemy.vx < 0) enemy.facingLeft = false;
-                    else enemy.facingLeft = true;
-                } else {
-                    // vertical push
-                    if (top + ph * 0.5f < ty + cellH * 0.5f) {
-                        // collision from above -> place on top
-                        top = ty - ph;
-                        enemy.vy = 0.0f;
-                        enemy.onGround = true;
-                    } else {
-                        // collision from below
-                        top += iy;
-                        if (enemy.vy < 0.0f) enemy.vy = 0.0f;
-                    }
-                    enemy.y = top + ph;
-                }
-            }
-        }
-    }
-
-    // Prevent falling off edges
-    if (enemy.onGround && fabs(enemy.vx) > 0.1f) {
-        int dir = enemy.vx > 0 ? 1 : -1;
-        int checkC = dir > 0 ? (int)std::floor((enemy.x + enemy.width) / cellW) : (int)std::floor(enemy.x / cellW);
-        int checkR = (int)std::floor((enemy.y + 1) / cellH);
-        if (checkC >= 0 && checkC < level.cols && checkR >= 0 && checkR < level.rows) {
-            if (level.grid[checkR][checkC] != 1) {
-                enemy.vx = -enemy.vx;
-                if (enemy.vx < 0) enemy.facingLeft = false;
-                else enemy.facingLeft = true;
-            }
-        }
-    }
-}
-
-struct Boss {
-    std::vector<Texture*> frames;
-    float x = 0.0f, y = 0.0f, vx = 0.0f, vy = 0.0f;
-    int width = 32, height = 48;
-    float hp = 10;
-    float invulnTimer = 0;
-    float invuln = 1.5f;
-    bool facingLeft = false;
-    int attackCount = 0;
-    float attackCooldown = 0;
-    float attackInterval = 2.0f;
-    float safeDist = 200.0f;
-    bool isMoving = false;
-    int currentFrame = 0;
-    float animationTimer = 0;
-
-    void update(float dt, Player& player, std::vector<Projectile>& projectiles, Texture& zelazo, int levelW) {
-        // Move to keep safe distance
-        float dx = player.x - x;
-        float dist = fabs(dx);
-        if (dist > safeDist + 10) {
-            vx = (dx > 0 ? 50 : -50);
-        } else if (dist < safeDist - 10) {
-            vx = (dx > 0 ? -50 : 50);
-        } else {
-            vx = 0;
-        }
-        x += vx * dt;
-        // Keep in bounds
-        if (x < 0) x = 0;
-        if (x > levelW - width) x = levelW - width;
-
-        // Attack
-        attackCooldown -= dt;
-        if (attackCooldown <= 0) {
-            attackCooldown = attackInterval;
-            attackCount++;
-            Projectile p;
-            p.tex = &zelazo;
-            p.x = x + width / 2.0f - p.width / 2.0f;
-            p.y = y - height / 2.0f - p.height / 2.0f;
-            float px = player.x + player.width / 2.0f;
-            float py = player.y - player.height / 2.0f;
-            float dx_attack = px - p.x;
-            float dy = py - p.y;
-            float dist_attack = sqrt(dx_attack * dx_attack + dy * dy);
-            if (dist_attack > 0) {
-                dx_attack /= dist_attack;
-                dy /= dist_attack;
-            }
-            if (attackCount % 5 == 0) {
-                p.vx = dx_attack * 400;
-                p.vy = dy * 400;
-                p.hasPhysics = false;
-                p.lifetime = 3.0f;
-            } else {
-                p.vx = facingLeft ? -300 : 300;
-                p.vy = -400;
-                p.hasPhysics = true;
-            }
-            p.active = true;
-            p.fromPlayer = false;
-            projectiles.push_back(p);
-        }
-
-        // Invuln timer
-        invulnTimer -= dt;
-        if (invulnTimer < 0) invulnTimer = 0;
-
-        // Face the player
-        facingLeft = (player.x < x);
-        isMoving = (fabs(vx) > 0.1f);
-
-        animationTimer += dt;
-        if (animationTimer >= 1.0f) animationTimer = 0.0f;
-    }
-
-    void render(SDL_Renderer* ren, int camX, int camY, float scale) {
-        if (isMoving) {
-            currentFrame = (int)(animationTimer * 5.0f) % frames.size();
-        }
-        int frame = currentFrame;
-        if (frames[frame] && frames[frame]->tex) {
-            SDL_Rect dst = { (int)((x - camX) * scale), (int)((y - height - camY) * scale), (int)(width * scale), (int)(height * scale) };
-            SDL_RenderCopyEx(ren, frames[frame]->tex, nullptr, &dst, 0.0, nullptr, facingLeft ? SDL_FLIP_NONE : SDL_FLIP_HORIZONTAL);
-        }
-    }
-};
-
-static void resolveBossCollisions(Boss& boss, Level& level, int cellW, int cellH) {
-    if (cellW <= 0 || cellH <= 0) return;
-    if (level.rows <= 0 || level.cols <= 0) return;
-
-    const float eps = 0.0001f;
-
-    float px = boss.x;
-    float pw = static_cast<float>(boss.width);
-    float top = boss.y - static_cast<float>(boss.height);
-    float ph = static_cast<float>(boss.height);
-
-    int minCol = (int)std::floor(px / cellW);
-    int maxCol = (int)std::floor((px + pw - eps) / cellW);
-    int minRow = (int)std::floor(top / cellH);
-    int maxRow = (int)std::floor((top + ph - eps) / cellH);
-
-    minCol = std::max(0, minCol);
-    minRow = std::max(0, minRow);
-    maxCol = std::min(level.cols - 1, maxCol);
-    maxRow = std::min(level.rows - 1, maxRow);
-
-    for (int r = minRow; r <= maxRow; ++r) {
-        if (r < 0 || r >= (int)level.grid.size()) continue;
-        for (int c = minCol; c <= maxCol; ++c) {
-            if (c < 0 || c >= (int)level.grid[r].size()) continue;
-
-            int cell = level.grid[r][c];
-            if (cell != 1) continue; // only solid
-
-            float tx = static_cast<float>(c * cellW);
-            float ty = static_cast<float>(r * cellH);
-
-            float ix = std::min(px + pw, tx + cellW) - std::max(px, tx);
-            float iy = std::min(top + ph, ty + cellH) - std::max(top, ty);
-
-            if (ix > 0.0f && iy >= 0.0f) {
-                if (ix < iy) {
-                    if (px + pw * 0.5f < tx + cellW * 0.5f) {
-                        px -= ix;
-                    } else {
-                        px += ix;
-                    }
-                    boss.x = px;
-                    boss.vx = -boss.vx;
-                } else {
-                    if (top + ph * 0.5f < ty + cellH * 0.5f) {
-                        // collision from above -> place on top
-                        top = ty - ph;
-                        boss.vy = 0.0f;
-                    } else {
-                        // collision from below
-                        top += iy;
-                        if (boss.vy < 0.0f) boss.vy = 0.0f;
-                    }
-                    boss.y = top + ph;
-                }
-            }
-        }
-    }
-}
 
 int main(int argc, char* argv[]) {
     if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0){
@@ -434,7 +50,7 @@ int main(int argc, char* argv[]) {
         SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Audio Error", "Failed to initialize audio. The game may not have sound.", nullptr);
     }
 
-    // Scaling fix (WIP)
+    // Scaling fix
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "linear");
 
     const int WINH = 288, WINW = 512;
@@ -475,7 +91,7 @@ int main(int argc, char* argv[]) {
     globalDeadSound = deadSound;
 
     // Set volumes
-    Mix_VolumeMusic(128); // max volume for music
+    Mix_VolumeMusic(64); // max volume for music
     Mix_Volume(-1, 128);  // max volume for chunks
 
     TTF_Font* hudFont = nullptr;
@@ -582,7 +198,7 @@ int main(int argc, char* argv[]) {
 
         // Place player on ground initially
         int levelH = level.rows * 32; // base tile = 32
-        player.y = static_cast<float>(std::max(0, levelH - player.height)); // put player on bottom of level
+        player.y = static_cast<float>(std::max<int>(0, levelH - player.height)); // put player on bottom of level
         player.onGround = true;
         player.vy = 0.0f;
 
@@ -603,7 +219,6 @@ int main(int argc, char* argv[]) {
             boss.y = (level.rows - 2) * 32.0f;
         }
 
-        // IMPORTANT: declare these before any use (loadFromFile, editor creation, camera math)
         const float editorTileScale = 1.0f;   // used only by LevelEditor
         const float renderTileScale = 1.0f;   // used for runtime drawing / player size scaling
         const int baseTilePixels = 32;        // physical base tile size (used for collision/camera)
@@ -647,14 +262,13 @@ int main(int argc, char* argv[]) {
                         Enemy e;
                         e.frames = { &f4, &f5, &f6 };
                         e.width = 32; e.height = 48;
-                        e.x = c * 32.0f;
-                        e.y = (r + 1) * 32.0f;
+                        e.x = (float)c * 32.0f;
+                        e.y = ((float)r + 1) * 32.0f;
                         e.vx = 50.f;
                         e.vy = 0.f;
                         e.onGround = true;
                         e.active = true;
                         enemies.push_back(e);
-                        // level.grid[r][c] = 0;
                     }
                 }
             }
@@ -667,14 +281,13 @@ int main(int argc, char* argv[]) {
                         Enemy e;
                         e.frames = { &f4, &f5, &f6 };
                         e.width = 32; e.height = 48;
-                        e.x = c * 32.0f;
-                        e.y = (r + 1) * 32.0f; // on top of tile
+                        e.x = (float)c * 32.0f;
+                        e.y = ((float)r + 1) * 32.0f; // on top of tile
                         e.vx = 50.f;
                         e.vy = 0.f;
                         e.onGround = true;
                         e.active = true;
                         enemies.push_back(e);
-                        // level.grid[r][c] = 0; // keep marker
                     }
                 }
             }
@@ -771,14 +384,13 @@ int main(int argc, char* argv[]) {
                             Enemy e;
                             e.frames = { &f4, &f5, &f6 };
                             e.width = 32; e.height = 48;
-                            e.x = c * 32.0f;
-                            e.y = (r + 1) * 32.0f;
+                            e.x = (float)c * 32.0f;
+                            e.y = ((float)r + 1) * 32.0f;
                             e.vx = 50.f;
                             e.vy = 0.f;
                             e.onGround = true;
                             e.active = true;
                             enemies.push_back(e);
-                            // level.grid[r][c] = 0;
                         }
                     }
                 }
@@ -828,8 +440,8 @@ int main(int argc, char* argv[]) {
                             Enemy e;
                             e.frames = { &f4, &f5, &f6 };
                             e.width = 32; e.height = 48;
-                            e.x = c * 32.0f;
-                            e.y = (r + 1) * 32.0f;
+                            e.x = (float)c * 32.0f;
+                            e.y = ((float)r + 1) * 32.0f;
                             e.vx = 50.f;
                             e.vy = 0.f;
                             e.onGround = true;
@@ -1017,13 +629,13 @@ int main(int argc, char* argv[]) {
                         e.update(dt, levelW);
                     }
                     for (auto& e : enemies) {
-                        resolveEnemyCollisions(e, level, physCellW, physCellH);
+                        Collision::resolveEnemyCollisions(e, level, physCellW, physCellH);
                     }
                 }
 
                 if (!editMode && !playerLost && !playerWon && selectedLevel == 10) {
-                    boss.update(dt, player, projectiles, zelazo, levelW);
-                    resolveBossCollisions(boss, level, physCellW, physCellH);
+                    boss.update((float)dt, player, projectiles, zelazo, levelW);
+                    Collision::resolveBossCollisions(boss, level, physCellW, physCellH);
                 }
 
                 if (editMode) {
@@ -1123,7 +735,7 @@ int main(int argc, char* argv[]) {
                 int worldH = std::max(levelH_now, winH);
 
                 if (!editMode && !playerLost && !playerWon) {
-                    resolvePlayerCollisions(player, level, physCellW , physCellH, saveData);
+                    Collision::resolvePlayerCollisions(player, level, physCellW , physCellH, saveData);
 
                     // Check collision with enemy
                     for (auto& enemy : enemies) {

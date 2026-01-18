@@ -1,3 +1,4 @@
+#pragma once
 #include "Texture.h"
 #include <vector>
 #include <SDL.h>
@@ -10,14 +11,13 @@ public:
     std::vector<Texture*> frames;
     int curFrame = 0;
     double frameTime = 0;
-    double frameDelay = 150.0; // ms per frame
+    double frameDelay = 150.0;
     int width = 64, height = 64;
 
-    // Stats
     int health = 3;
     int score = 0;
-    float invuln = 1.5f;      // seconds of invulnerability after taking damage
-    float invulnTimer = 0.0f; // timer for invulnerability
+    float invuln = 1.5f;
+    float invulnTimer = 0.0f;
     bool facingLeft = false;
     float projectileCooldown = 0.0f;
 

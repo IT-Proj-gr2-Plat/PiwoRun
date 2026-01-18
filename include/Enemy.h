@@ -1,4 +1,6 @@
-#pragma once
+#ifndef ENEMY_H
+#define ENEMY_H
+
 #include "Texture.h"
 #include <vector>
 #include <SDL.h>
@@ -21,3 +23,5 @@ public:
     void update(double dt, int levelWidth);
     void render(SDL_Renderer* r, int camX, int camY, float renderScale = 1.0f);
 };
+
+#endif // ENEMY_H

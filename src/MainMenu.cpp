@@ -9,7 +9,7 @@ static bool isMuted = false;
 
 MainMenu::MainMenu(SDL_Renderer* ren, const std::string& assetsDir, int maxLevel) : ren(ren), currentIndex(0), maxLevel(maxLevel) {
     std::vector<std::string> names;
-    for (int i = 1; i <= maxLevel; ++i) {
+    for (int i = 1; i <= maxLevel   ; ++i) {
         std::string name = (i == 10) ? "boss" : std::to_string(i);
         names.push_back(name);
     }

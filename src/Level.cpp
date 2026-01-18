@@ -5,7 +5,6 @@
 #include <sstream>
 #include <algorithm>
 #include <limits>
-#include <cstdio>
 #include "ZipUtil.h"
 
 Level::Level()
