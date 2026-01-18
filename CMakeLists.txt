@@ -3,12 +3,17 @@ project(Projekcik LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+if(MSVC)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /utf-8")
+endif()
+
 find_package(SDL2 CONFIG REQUIRED)
 find_package(SDL2_image CONFIG REQUIRED)
 find_package(SDL2_ttf CONFIG QUIET)        # prefer CONFIG but allow missing
 find_package(ZLIB QUIET)
 find_package(unofficial-minizip CONFIG QUIET)
 find_package(SDL2_ttf CONFIG REQUIRED)
+find_package(SDL2_mixer CONFIG REQUIRED)
 
 add_executable(projekcik
         src/main.cpp
@@ -19,9 +24,13 @@ add_executable(projekcik
         src/ZipUtil.cpp
         src/Menu.cpp
         src/MainMenu.cpp
+        src/Enemy.cpp
+        src/Boss.cpp
+        src/Collision.cpp
+        src/SaveData.cpp
         include/Menu.h
         include/MainMenu.h
-        src/MainMenu.cpp
+        include/Enemy.h
 )
 
 target_include_directories(projekcik PRIVATE include)
@@ -86,6 +95,25 @@ else()
         target_link_libraries(projekcik PRIVATE SDL2_ttf)
     else()
         message(WARNING "SDL2_ttf not found via CONFIG. Menu text rendering will be disabled unless TTF is available at runtime.")
+    endif()
+endif()
+
+# SDL2_mixer: link if available
+if(TARGET SDL2::SDL2_mixer)
+    set(_SDL2_MIXER_TARGET SDL2::SDL2_mixer)
+elseif(TARGET SDL2_mixer::SDL2_mixer)
+    set(_SDL2_MIXER_TARGET SDL2_mixer::SDL2_mixer)
+elseif(TARGET SDL2_mixer)
+    set(_SDL2_MIXER_TARGET SDL2_mixer)
+endif()
+
+if(DEFINED _SDL2_MIXER_TARGET)
+    target_link_libraries(projekcik PRIVATE ${_SDL2_MIXER_TARGET})
+else()
+    if(TARGET SDL2_mixer)
+        target_link_libraries(projekcik PRIVATE SDL2_mixer)
+    else()
+        message(WARNING "SDL2_mixer not found via CONFIG. Audio will be disabled.")
     endif()
 endif()
 
