@@ -1,4 +1,4 @@
-# Projekcik
+# PiwoRun
 Platformówka
 
 Aby uruchomić projekt należy zainstalować dependencje SDL i Minizip
